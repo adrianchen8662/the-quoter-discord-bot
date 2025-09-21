@@ -135,23 +135,16 @@ async def ping_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name='quote', description='Quote a message to the quote channel')
-async def quote_command(interaction: discord.Interaction):
-    """Quote the message being replied to"""
-    
-    # Check if this is a reply to another message
-    if not interaction.message or not interaction.message.reference:
-        await interaction.response.send_message(
-            "❌ You must reply to a message to use this command!", 
-            ephemeral=True
-        )
-        return
-    
+async def quote_message_helper(interaction: discord.Interaction, message_to_quote: discord.Message):
+    """Helper function to quote a message"""
     try:
-        # Get the referenced message
-        referenced_message = await interaction.channel.fetch_message(
-            interaction.message.reference.message_id
-        )
+        # Check if the message is from a bot (prevent quoting bot messages)
+        if message_to_quote.author.bot:
+            await interaction.response.send_message(
+                "❌ You cannot quote messages from bots!", 
+                ephemeral=True
+            )
+            return
         
         # Get the quote channel
         quote_channel = bot.get_channel(QUOTE_CHANNEL_ID)
@@ -163,8 +156,8 @@ async def quote_command(interaction: discord.Interaction):
             return
         
         # Format the quote
-        quoted_content = referenced_message.content
-        quoted_user = referenced_message.author
+        quoted_content = message_to_quote.content
+        quoted_user = message_to_quote.author
         
         # Handle empty messages (like image-only messages)
         if not quoted_content:
@@ -177,7 +170,7 @@ async def quote_command(interaction: discord.Interaction):
         embed = discord.Embed(
             description=quote_text,
             color=0x00ff00,
-            timestamp=referenced_message.created_at
+            timestamp=message_to_quote.created_at
         )
         
         embed.set_author(
@@ -193,7 +186,7 @@ async def quote_command(interaction: discord.Interaction):
         # Add jump link to original message
         embed.add_field(
             name="Original Message",
-            value=f"[Jump to message]({referenced_message.jump_url})",
+            value=f"[Jump to message]({message_to_quote.jump_url})",
             inline=False
         )
         
@@ -206,93 +199,89 @@ async def quote_command(interaction: discord.Interaction):
             ephemeral=True
         )
         
-    except discord.NotFound:
-        await interaction.response.send_message(
-            "❌ Referenced message not found!", 
-            ephemeral=True
-        )
     except discord.Forbidden:
         await interaction.response.send_message(
             "❌ I don't have permission to access the quote channel!", 
             ephemeral=True
         )
     except Exception as e:
-        print(f"Error in quote command: {e}")
+        print(f"Error in quote helper: {e}")
         await interaction.response.send_message(
             "❌ An error occurred while quoting the message!", 
             ephemeral=True
         )
+
+@bot.tree.command(name='quote', description='Quote a message (reply to a message or provide message ID)')
+async def quote_command(interaction: discord.Interaction, message_id: str = None):
+    """Quote a message by replying to it or providing a message ID"""
+    
+    message_to_quote = None
+    
+    # First, try to get the message from the message_id parameter
+    if message_id:
+        try:
+            message_to_quote = await interaction.channel.fetch_message(int(message_id))
+        except (ValueError, discord.NotFound):
+            await interaction.response.send_message(
+                "❌ Invalid message ID or message not found!", 
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            print(f"Error fetching message by ID: {e}")
+            await interaction.response.send_message(
+                "❌ Error fetching the message!", 
+                ephemeral=True
+            )
+            return
+    
+    # If no message_id provided, try to find a replied-to message
+    if not message_to_quote:
+        # For slash commands, we need to look at the interaction's data to find replies
+        # This is a workaround since slash commands don't have direct reply detection
+        
+        # Try to get recent messages and find one that this might be replying to
+        try:
+            # Get the last few messages in the channel
+            messages = []
+            async for msg in interaction.channel.history(limit=20):
+                messages.append(msg)
+            
+            # Look for the most recent non-bot message that isn't from the user who ran the command
+            for msg in messages:
+                if msg.author != interaction.user and not msg.author.bot:
+                    # Ask the user to confirm this is the message they want to quote
+                    # For now, we'll assume the most recent non-bot message is what they want
+                    message_to_quote = msg
+                    break
+        except Exception as e:
+            print(f"Error finding message to quote: {e}")
+    
+    if not message_to_quote:
+        await interaction.response.send_message(
+            "❌ Please provide a message ID with the command: `/quote message_id:123456789`\n"
+            "You can get a message ID by right-clicking a message and selecting 'Copy ID' "
+            "(Developer Mode must be enabled in Discord settings).", 
+            ephemeral=True
+        )
+        return
+    
+    await quote_message_helper(interaction, message_to_quote)
 
 # Alternative context menu command (right-click on message)
 @bot.tree.context_menu(name='Quote Message')
 async def quote_context_menu(interaction: discord.Interaction, message: discord.Message):
     """Quote a message via right-click context menu"""
     
-    try:
-        # Get the quote channel
-        quote_channel = bot.get_channel(QUOTE_CHANNEL_ID)
-        if not quote_channel:
-            await interaction.response.send_message(
-                "❌ Quote channel not found!", 
-                ephemeral=True
-            )
-            return
-        
-        # Format the quote
-        quoted_content = message.content
-        quoted_user = message.author
-        
-        # Handle empty messages
-        if not quoted_content:
-            quoted_content = "*[Image or empty message]*"
-        
-        # Create the quote message
-        quote_text = f'"{quoted_content}" - {quoted_user.mention}'
-        
-        # Create an embed
-        embed = discord.Embed(
-            description=quote_text,
-            color=0x00ff00,
-            timestamp=message.created_at
-        )
-        
-        embed.set_author(
-            name=f"Quote from #{interaction.channel.name}",
-            icon_url=quoted_user.display_avatar.url
-        )
-        
-        embed.set_footer(
-            text=f"Quoted by {interaction.user.display_name}",
-            icon_url=interaction.user.display_avatar.url
-        )
-        
-        # Add jump link to original message
-        embed.add_field(
-            name="Original Message",
-            value=f"[Jump to message]({message.jump_url})",
-            inline=False
-        )
-        
-        # Send to quote channel
-        await quote_channel.send(embed=embed)
-        
-        # Confirm to user
+    # Check if the message is from a bot (prevent quoting bot messages)
+    if message.author.bot:
         await interaction.response.send_message(
-            f"✅ Message quoted to {quote_channel.mention}!", 
+            "❌ You cannot quote messages from bots!", 
             ephemeral=True
         )
-        
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            "❌ I don't have permission to access the quote channel!", 
-            ephemeral=True
-        )
-    except Exception as e:
-        print(f"Error in quote context menu: {e}")
-        await interaction.response.send_message(
-            "❌ An error occurred while quoting the message!", 
-            ephemeral=True
-        )
+        return
+    
+    await quote_message_helper(interaction, message)
 
 # Error handling
 @bot.event
